@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>My Serverless Gallery</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    background: #111;
+    color: #eee;
+    margin: 0;
+    padding: 20px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  h1 { font-size: 22px; }
+  button {
+    background: #ff9900;
+    border: none;
+    color: #111;
+    padding: 10px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  button:hover { background: #ffb84d; }
+  #uploadSection { margin-bottom: 20px; }
+  #status { margin: 10px 0; color: #9f9; }
+  #gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 15px;
+  }
+  .card {
+    background: #1e1e1e;
+    border-radius: 8px;
+    overflow: hidden;
+    text-align: center;
+  }
+  .card img {
+    width: 100%;
+    height: 150px;
+    object-fit: cover;
+    display: block;
+    cursor: pointer;
+  }
+  .card .info {
+    padding: 8px;
+    font-size: 12px;
+  }
+  .card button {
+    margin: 8px;
+    background: #cc3333;
+    color: white;
+  }
+  #loginSection { text-align: center; margin-top: 100px; }
+</style>
+</head>
+<body>
+
+<div id="loginSection">
+  <h1>Welcome to My Serverless Gallery</h1>
+  <button onclick="login()">Login / Sign Up</button>
+</div>
+
+<div id="appSection" style="display:none;">
+  <header>
+    <h1>My Gallery</h1>
+    <button onclick="logout()">Logout</button>
+  </header>
+
+  <div id="uploadSection">
+    <input type="file" id="fileInput" accept="image/*">
+    <button onclick="uploadImage()">Upload</button>
+    <div id="status"></div>
+  </div>
+
+  <div id="gallery"></div>
+</div>
+
+<script>
+  // ===== CONFIG - replace with your own values if you fork this =====
+  const COGNITO_DOMAIN = "https://ap-south-1med4dvggh.auth.ap-south-1.amazoncognito.com";
+  const CLIENT_ID = "6o1f8v6f7dikr40b28tddkfpss";
+  // Set this to wherever the frontend is hosted (localhost while developing,
+  // your S3 website URL once deployed). Must also be added as a Callback URL
+  // and Sign-out URL in the Cognito App Client settings.
+  const REDIRECT_URI = window.location.origin;
+  const API_BASE = "https://r71rphxhb5.execute-api.ap-south-1.amazonaws.com/prod";
+  // =====================================================================
+
+  function login() {
+    const url = `${COGNITO_DOMAIN}/login?client_id=${CLIENT_ID}&response_type=code&scope=email+openid+phone&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+    window.location.href = url;
+  }
+
+  function logout() {
+    localStorage.removeItem("id_token");
+    localStorage.removeItem("access_token");
+    const url = `${COGNITO_DOMAIN}/logout?client_id=${CLIENT_ID}&logout_uri=${encodeURIComponent(REDIRECT_URI)}`;
+    window.location.href = url;
+  }
+
+  // Exchange authorization code for tokens
+  async function exchangeCodeForTokens(code) {
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: CLIENT_ID,
+      code: code,
+      redirect_uri: REDIRECT_URI
+    });
+
+    const res = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body
+    });
+
+    const data = await res.json();
+    if (data.id_token) {
+      localStorage.setItem("id_token", data.id_token);
+      localStorage.setItem("access_token", data.access_token);
+      window.history.replaceState({}, document.title, REDIRECT_URI);
+      showApp();
+    } else {
+      console.error("Token exchange failed", data);
+    }
+  }
+
+  function getIdToken() {
+    return localStorage.getItem("id_token");
+  }
+
+  function showApp() {
+    document.getElementById("loginSection").style.display = "none";
+    document.getElementById("appSection").style.display = "block";
+    loadGallery();
+  }
+
+  function showLogin() {
+    document.getElementById("loginSection").style.display = "block";
+    document.getElementById("appSection").style.display = "none";
+  }
+
+  async function uploadImage() {
+    const fileInput = document.getElementById("fileInput");
+    const file = fileInput.files[0];
+    if (!file) {
+      alert("Please choose a file first.");
+      return;
+    }
+
+    const status = document.getElementById("status");
+    status.textContent = "Getting upload URL...";
+
+    try {
+      const res = await fetch(`${API_BASE}/upload?filename=${encodeURIComponent(file.name)}`, {
+        headers: { Authorization: getIdToken() }
+      });
+      const data = await res.json();
+
+      status.textContent = "Uploading...";
+
+      await fetch(data.uploadUrl, {
+        method: "PUT",
+        body: file
+      });
+
+      status.textContent = "Upload complete! Refreshing gallery...";
+      setTimeout(loadGallery, 2000); // small delay so Lambda can process the thumbnail
+    } catch (err) {
+      console.error(err);
+      status.textContent = "Upload failed. Check console for details.";
+    }
+  }
+
+  async function loadGallery() {
+    const gallery = document.getElementById("gallery");
+    gallery.innerHTML = "Loading...";
+
+    try {
+      const res = await fetch(`${API_BASE}/images`, {
+        headers: { Authorization: getIdToken() }
+      });
+      const items = await res.json();
+
+      if (!items.length) {
+        gallery.innerHTML = "<p>No images yet. Upload your first one!</p>";
+        return;
+      }
+
+      gallery.innerHTML = "";
+      items.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <img src="${item.thumbnailUrl}" alt="${item.filename}" onclick="window.open('${item.originalUrl}', '_blank')">
+          <div class="info">${item.filename}</div>
+          <button onclick="deleteImage('${item.imageId}')">Delete</button>
+        `;
+        gallery.appendChild(card);
+      });
+    } catch (err) {
+      console.error(err);
+      gallery.innerHTML = "<p>Failed to load gallery.</p>";
+    }
+  }
+
+  async function deleteImage(imageId) {
+    if (!confirm("Delete this image?")) return;
+
+    try {
+      await fetch(`${API_BASE}/images/${imageId}`, {
+        method: "DELETE",
+        headers: { Authorization: getIdToken() }
+      });
+      loadGallery();
+    } catch (err) {
+      console.error(err);
+      alert("Delete failed.");
+    }
+  }
+
+  // On page load: check if returning from Cognito login (has ?code=...)
+  window.onload = () => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+
+    if (code) {
+      exchangeCodeForTokens(code);
+    } else if (getIdToken()) {
+      showApp();
+    } else {
+      showLogin();
+    }
+  };
+</script>
+
+</body>
+</html>
